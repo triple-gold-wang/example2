@@ -4,6 +4,7 @@ import torch
 import os
 import random
 import matplotlib.pyplot as plt
+from matplotlib.patches import Ellipse
 from matplotlib.tri import Triangulation
 from scipy.interpolate import griddata
 
@@ -25,10 +26,72 @@ ABAQUS_CMAP = 'jet'   # Abaqus风格常见彩虹色图
 ERROR_CMAP = 'inferno'
 
 
-def _draw_abaqus_contour(ax, tri, values, title, cmap, vmin=None, vmax=None):
+def _ellipse_level_set(x, y, a, b, theta):
+    """椭圆隐式函数值: <=1 在椭圆内，=1 在边界上。"""
+    c, s = np.cos(theta), np.sin(theta)
+    xr = c * x + s * y
+    yr = -s * x + c * y
+    return (xr / a) ** 2 + (yr / b) ** 2
+
+
+def _build_masked_triangulation(x, y, a, b, theta):
+    """构建带孔洞掩膜的三角剖分，避免等值图跨孔填充。"""
+    tri = Triangulation(x, y)
+    triangles = tri.triangles
+
+    x0 = x[triangles[:, 0]]
+    y0 = y[triangles[:, 0]]
+    x1 = x[triangles[:, 1]]
+    y1 = y[triangles[:, 1]]
+    x2 = x[triangles[:, 2]]
+    y2 = y[triangles[:, 2]]
+
+    xc = (x0 + x1 + x2) / 3.0
+    yc = (y0 + y1 + y2) / 3.0
+    xm01 = (x0 + x1) / 2.0
+    ym01 = (y0 + y1) / 2.0
+    xm12 = (x1 + x2) / 2.0
+    ym12 = (y1 + y2) / 2.0
+    xm20 = (x2 + x0) / 2.0
+    ym20 = (y2 + y0) / 2.0
+
+    in_hole = (
+        (_ellipse_level_set(xc, yc, a, b, theta) < 1.0)
+        | (_ellipse_level_set(xm01, ym01, a, b, theta) < 1.0)
+        | (_ellipse_level_set(xm12, ym12, a, b, theta) < 1.0)
+        | (_ellipse_level_set(xm20, ym20, a, b, theta) < 1.0)
+    )
+    tri.set_mask(in_hole)
+    return tri
+
+
+def _overlay_geometry(ax, a, b, theta, L=1.0):
+    """叠加外方形边界和椭圆孔边界，提升几何可读性。"""
+    square_x = np.array([-L, L, L, -L, -L])
+    square_y = np.array([-L, -L, L, L, -L])
+    ax.plot(square_x, square_y, color='black', linewidth=0.9, zorder=8)
+
+    hole = Ellipse(
+        xy=(0.0, 0.0),
+        width=2.0 * a,
+        height=2.0 * b,
+        angle=np.degrees(theta),
+        facecolor='white',
+        edgecolor='black',
+        linewidth=1.1,
+        zorder=9,
+    )
+    ax.add_patch(hole)
+
+
+def _draw_abaqus_contour(ax, tri, values, title, cmap, a, b, theta, vmin=None, vmax=None):
     """使用三角剖分等值云图，接近 Abaqus 结果显示风格。"""
     mappable = ax.tricontourf(tri, values, levels=36, cmap=cmap, vmin=vmin, vmax=vmax)
     ax.tricontour(tri, values, levels=12, colors='k', linewidths=0.15, alpha=0.22)
+    _overlay_geometry(ax, a, b, theta, L=1.0)
+
+    ax.set_xlim(-1.05, 1.05)
+    ax.set_ylim(-1.05, 1.05)
     ax.set_aspect('equal')
     ax.set_xticks([])
     ax.set_yticks([])
@@ -40,7 +103,11 @@ def save_uv_comparison_plot(sample, output_dir):
     """保存单样本 3x2 图：u/v 的预测-真值对比 + 绝对误差。"""
     x = sample['x']
     y = sample['y']
-    tri = Triangulation(x, y)
+    a = sample['a']
+    b = sample['b']
+    theta = sample['theta']
+
+    tri = _build_masked_triangulation(x, y, a, b, theta)
 
     u_pred = sample['u_pred']
     v_pred = sample['v_pred']
@@ -55,16 +122,16 @@ def save_uv_comparison_plot(sample, output_dir):
 
     fig, axes = plt.subplots(3, 2, figsize=(11, 14), constrained_layout=True)
 
-    m_u_pred = _draw_abaqus_contour(axes[0, 0], tri, u_pred, 'U Pred', ABAQUS_CMAP, u_min, u_max)
-    _draw_abaqus_contour(axes[0, 1], tri, u_true, 'U True', ABAQUS_CMAP, u_min, u_max)
+    m_u_pred = _draw_abaqus_contour(axes[0, 0], tri, u_pred, 'U Pred', ABAQUS_CMAP, a, b, theta, u_min, u_max)
+    _draw_abaqus_contour(axes[0, 1], tri, u_true, 'U True', ABAQUS_CMAP, a, b, theta, u_min, u_max)
     fig.colorbar(m_u_pred, ax=[axes[0, 0], axes[0, 1]], fraction=0.03, pad=0.01)
 
-    m_v_pred = _draw_abaqus_contour(axes[1, 0], tri, v_pred, 'V Pred', ABAQUS_CMAP, v_min, v_max)
-    _draw_abaqus_contour(axes[1, 1], tri, v_true, 'V True', ABAQUS_CMAP, v_min, v_max)
+    m_v_pred = _draw_abaqus_contour(axes[1, 0], tri, v_pred, 'V Pred', ABAQUS_CMAP, a, b, theta, v_min, v_max)
+    _draw_abaqus_contour(axes[1, 1], tri, v_true, 'V True', ABAQUS_CMAP, a, b, theta, v_min, v_max)
     fig.colorbar(m_v_pred, ax=[axes[1, 0], axes[1, 1]], fraction=0.03, pad=0.01)
 
-    m_u_err = _draw_abaqus_contour(axes[2, 0], tri, u_err, '|U Error|', ERROR_CMAP)
-    m_v_err = _draw_abaqus_contour(axes[2, 1], tri, v_err, '|V Error|', ERROR_CMAP)
+    m_u_err = _draw_abaqus_contour(axes[2, 0], tri, u_err, '|U Error|', ERROR_CMAP, a, b, theta)
+    m_v_err = _draw_abaqus_contour(axes[2, 1], tri, v_err, '|V Error|', ERROR_CMAP, a, b, theta)
     fig.colorbar(m_u_err, ax=axes[2, 0], fraction=0.046, pad=0.02)
     fig.colorbar(m_v_err, ax=axes[2, 1], fraction=0.046, pad=0.02)
 
